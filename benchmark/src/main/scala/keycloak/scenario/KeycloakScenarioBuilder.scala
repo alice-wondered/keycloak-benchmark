@@ -336,11 +336,11 @@ class KeycloakScenarioBuilder {
     .exec(http("Get service account token")
       .post(TOKEN_ENDPOINT)
       .formParam("grant_type", "client_credentials")
-      .formParam("client_id", "gatling")
+      .formParam("client_id", "${clientId}")
       .formParam("client_secret", "${clientSecret}")
       .check(
-        jsonPath("$..access_token").find.saveAs("token"),
-        jsonPath("$..expires_in").find.saveAs("expiresIn")
+        jsonPath("$.access_token").find.saveAs("token"),
+        jsonPath("$.expires_in").find.saveAs("expiresIn")
       ))
       .exitHereIfFailed
       .exec(s => {
@@ -440,6 +440,87 @@ class KeycloakScenarioBuilder {
         .check(status.is(204)))
       .exec(session => (session.removeAll("groupLocation")))
       .exitHereIfFailed
+    this
+  }
+
+  def createOrg(): KeycloakScenarioBuilder = {
+    chainBuilder = chainBuilder
+      .exec(_.set("createdOrgName", randomUUID()))
+      .exec(http("Create Organization")
+        .post(ADMIN_ENDPOINT + "/organizations")
+        .header("Authorization", "Bearer ${token}")
+        .header("Content-Type", "application/json")
+        .body(StringBody("""{"name":"${createdOrgName}","enabled":true,"domains":["${createdOrgName}.com"]}"""))
+        .check(status.is(201))
+        .check(header("Location").notNull.saveAs("orgLocation")))
+      .exec(session => (session.removeAll("")))
+      .exitHereIfFailed
+    this
+  }
+
+  // Create a new organization for testing (only one) if it hasn't already been created
+  // this org also has an associated domain
+  def createSingleOrg(): KeycloakScenarioBuilder = {
+    chainBuilder = chainBuilder
+      .doIf(session => session("orgLocation").asOption[String].isEmpty) (
+        exec(http("Create Test Organization")
+          .post(ADMIN_ENDPOINT + "/organizations")
+          .header("Authorization", "Bearer ${token}")
+          .header("Content-Type", "application/json")
+          .body(StringBody("""{"name":"test_org","enabled":true,"domains":[{"name":"testorg.com"}]}"""))
+          .check(status.is(201))
+          .check(header("Location").notNull.saveAs("orgLocation")))
+      )
+    this
+  }
+
+  def joinOrg(): KeycloakScenarioBuilder = {
+    chainBuilder = chainBuilder
+      .exec(http("Join Organization")
+        // TODO figure out the add members endpoint
+        .post("${orgLocation}/members")
+        .header("Authorization", "Bearer ${token}")
+        .header("Content-Type", "application/json")
+        .body(StringBody("""${userId}"""))
+        .check(status.is(201)))
+      .exec(session => (session.removeAll("")))
+      .exitHereIfFailed
+    this
+  }
+
+  def listOrgs(): KeycloakScenarioBuilder = {
+    chainBuilder = chainBuilder
+      .exec(http("List organizations")
+      .get(ADMIN_ENDPOINT + "/organizations")
+      .header("Authorization", "Bearer ${token}")
+      .header("Content-Type", "application/json")
+      .check(status.is(200)))
+      .exitHereIfFailed
+    this
+  }
+
+  def listOrgMembers(): KeycloakScenarioBuilder = {
+    chainBuilder = chainBuilder
+      .exec(http("List organization members")
+        .get("${orgLocation}/members")
+        .header("Authorization", "Bearer ${token}")
+        .header("Content-Type", "application/json")
+        .check(status.is(200)))
+      .exitHereIfFailed
+    this
+  }
+
+  def createIdp(): KeycloakScenarioBuilder = {
+    chainBuilder = chainBuilder
+      .exec(_.set("idpUUID", randomUUID()))
+    .exec(http("Create IDP with configurations")
+      .get(ADMIN_ENDPOINT + "/identity-provider/instances")
+      .header("Authorization", "Bearer ${token}")
+      .header("Content-Type", "application/json")
+      .body(StringBody(
+        """{ "alias": "${idpUUID}", "displayName": "${idpUUID}", "providerId": "${idpUUID}", "enabled": true }""".stripMargin))
+      .check(status.is(201))
+      .check(header("Location").notNull.saveAs("idpLocation")))
     this
   }
 
@@ -613,7 +694,9 @@ class KeycloakScenarioBuilder {
         .header("Content-Type", "application/json")
         .body(StringBody("""{"username":"${username}"}"""))
         .check(status.is(201))
-        .check(header("Location").notNull.saveAs("userLocation")))
+        .check(header("Location").notNull.saveAs("userLocation"))
+        .check(header("Location").transform(x => x.substring(x.lastIndexOf("/") + 1)).notNull.saveAs("userId"))
+      )
       .exitHereIfFailed
     this
   }
@@ -623,8 +706,6 @@ class KeycloakScenarioBuilder {
           .exec(http("List Users")
             .get(ADMIN_ENDPOINT + "/users")
             .header("Authorization", "Bearer ${token}")
-            .queryParam("first", 0)
-            .queryParam("max", 2)
             .check(
               status.is(200),
               jsonPath("$[*]").count.lte(2)))
